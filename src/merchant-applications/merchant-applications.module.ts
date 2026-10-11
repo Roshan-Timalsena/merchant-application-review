@@ -7,6 +7,7 @@ import { AuditModule } from '../audit/audit.module';
 import { UsersModule } from '../users/users.module';
 import { MerchantApplication } from './entities/merchant-application.entity';
 import { MerchantApplicationsController } from './controllers/merchant-applications.controller';
+import { MerchantApplicationsRepository } from './repositories/merchant-applications.repository';
 import { MerchantApplicationsService } from './services/merchant-applications.service';
 import { RISK_KYB_QUEUE } from './risk-kyb.queue';
 import { RiskKybProcessor } from './risk-kyb.processor';
@@ -23,7 +24,11 @@ import { RiskKybProcessor } from './risk-kyb.processor';
     AuditModule,
   ],
   controllers: [MerchantApplicationsController],
-  providers: [MerchantApplicationsService, RiskKybProcessor],
+  providers: [
+    MerchantApplicationsRepository,
+    MerchantApplicationsService,
+    RiskKybProcessor,
+  ],
   exports: [MerchantApplicationsService],
 })
 export class MerchantApplicationsModule {}

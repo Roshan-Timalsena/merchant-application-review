@@ -5,9 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
-import { InjectRepository } from '@nestjs/typeorm';
 import { Queue } from 'bullmq';
-import { Repository } from 'typeorm';
 import { AuditAction } from '../../audit/enums/audit-action.enum';
 import { AuditActorType } from '../../audit/enums/audit-action.enum';
 import { AuditService } from '../../audit/services/audit.service';
@@ -27,6 +25,7 @@ import {
   KybCheckStatus,
   RiskStatus,
 } from '../enums/merchant-application.enums';
+import { MerchantApplicationsRepository } from '../repositories/merchant-applications.repository';
 import {
   RISK_KYB_QUEUE,
   RiskKybJobPayload,
@@ -39,8 +38,7 @@ const RISK_REVIEW_JOB_NAME = 'risk-review';
 @Injectable()
 export class MerchantApplicationsService {
   constructor(
-    @InjectRepository(MerchantApplication)
-    private readonly applicationsRepository: Repository<MerchantApplication>,
+    private readonly applicationsRepository: MerchantApplicationsRepository,
     private readonly usersService: UsersService,
     private readonly auditService: AuditService,
     private readonly logger: Logger,
@@ -102,23 +100,16 @@ export class MerchantApplicationsService {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
 
-    const qb = this.applicationsRepository.createQueryBuilder('app');
+    const [data, total] = await this.applicationsRepository.findPaginated({
+      page,
+      limit,
+      status: query.status,
+      createdById:
+        actor.role === UserRole.SALES ? actor.id : undefined,
+      reviewerId:
+        actor.role === UserRole.REVIEWER ? actor.id : undefined,
+    });
 
-    if (actor.role === UserRole.SALES) {
-      qb.andWhere('app.created_by_id = :createdById', {
-        createdById: actor.id,
-      });
-    }
-
-    if (query.status) {
-      qb.andWhere('app.status = :status', { status: query.status });
-    }
-
-    qb.orderBy('app.created_at', 'DESC')
-      .skip((page - 1) * limit)
-      .take(limit);
-
-    const [data, total] = await qb.getManyAndCount();
     return { data, meta: { page, limit, total } };
   }
 
@@ -380,9 +371,7 @@ export class MerchantApplicationsService {
   }
 
   private async getByIdOrThrow(id: string): Promise<MerchantApplication> {
-    const application = await this.applicationsRepository.findOne({
-      where: { id },
-    });
+    const application = await this.applicationsRepository.findById(id);
     if (!application) {
       throw new NotFoundException('Application not found');
     }
@@ -390,10 +379,17 @@ export class MerchantApplicationsService {
   }
 
   private assertCanRead(application: MerchantApplication, actor: User): void {
-    if (actor.role === UserRole.ADMIN || actor.role === UserRole.REVIEWER) {
+    if (actor.role === UserRole.ADMIN) {
       return;
     }
     if (actor.role === UserRole.SALES && application.createdById === actor.id) {
+      return;
+    }
+    if (
+      actor.role === UserRole.REVIEWER &&
+      (application.assignedReviewerId === actor.id ||
+        application.createdById === actor.id)
+    ) {
       return;
     }
     throw new ForbiddenException('You do not have access to this application');

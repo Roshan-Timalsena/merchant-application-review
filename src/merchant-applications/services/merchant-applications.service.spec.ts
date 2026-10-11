@@ -1,6 +1,5 @@
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
-import { getRepositoryToken } from '@nestjs/typeorm';
 import { getQueueToken } from '@nestjs/bullmq';
 import { AuditService } from '../../audit/services/audit.service';
 import { Logger } from '../../logger/logger.service';
@@ -14,6 +13,7 @@ import {
   KybCheckStatus,
   RiskStatus,
 } from '../enums/merchant-application.enums';
+import { MerchantApplicationsRepository } from '../repositories/merchant-applications.repository';
 import { RISK_KYB_QUEUE } from '../risk-kyb.queue';
 import { MerchantApplicationsService } from './merchant-applications.service';
 
@@ -22,8 +22,8 @@ describe('MerchantApplicationsService', () => {
   let repo: {
     create: jest.Mock;
     save: jest.Mock;
-    findOne: jest.Mock;
-    createQueryBuilder: jest.Mock;
+    findById: jest.Mock;
+    findPaginated: jest.Mock;
   };
   let queue: { add: jest.Mock };
   let audit: { record: jest.Mock; findForEntity: jest.Mock };
@@ -94,8 +94,8 @@ describe('MerchantApplicationsService', () => {
     repo = {
       create: jest.fn((x) => ({ id: 'app-1', ...x })),
       save: jest.fn(async (x) => x),
-      findOne: jest.fn(),
-      createQueryBuilder: jest.fn(),
+      findById: jest.fn(),
+      findPaginated: jest.fn().mockResolvedValue([[], 0]),
     };
     queue = { add: jest.fn() };
     audit = { record: jest.fn(), findForEntity: jest.fn() };
@@ -105,7 +105,7 @@ describe('MerchantApplicationsService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         MerchantApplicationsService,
-        { provide: getRepositoryToken(MerchantApplication), useValue: repo },
+        { provide: MerchantApplicationsRepository, useValue: repo },
         { provide: UsersService, useValue: usersService },
         { provide: AuditService, useValue: audit },
         { provide: Logger, useValue: logger },
@@ -117,14 +117,14 @@ describe('MerchantApplicationsService', () => {
   });
 
   it('forbids SALES from reading another user application', async () => {
-    repo.findOne.mockResolvedValue(baseApp());
+    repo.findById.mockResolvedValue(baseApp());
     await expect(service.findOne('app-1', salesB)).rejects.toBeInstanceOf(
       ForbiddenException,
     );
   });
 
   it('forbids REVIEWER from reading an application assigned to someone else', async () => {
-    repo.findOne.mockResolvedValue({
+    repo.findById.mockResolvedValue({
       ...baseApp(),
       assignedReviewerId: 'reviewer-a',
     });
@@ -141,7 +141,7 @@ describe('MerchantApplicationsService', () => {
   });
 
   it('allows assigned REVIEWER to read an application', async () => {
-    repo.findOne.mockResolvedValue({
+    repo.findById.mockResolvedValue({
       ...baseApp(),
       assignedReviewerId: 'reviewer-a',
     });
@@ -153,7 +153,7 @@ describe('MerchantApplicationsService', () => {
   });
 
   it('allows REVIEWER to read an application they created', async () => {
-    repo.findOne.mockResolvedValue({
+    repo.findById.mockResolvedValue({
       ...baseApp(),
       createdById: 'reviewer-a',
       assignedReviewerId: null,
@@ -166,30 +166,19 @@ describe('MerchantApplicationsService', () => {
   });
 
   it('scopes REVIEWER findAll to assigned or created applications', async () => {
-    const andWhere = jest.fn().mockReturnThis();
-    const orderBy = jest.fn().mockReturnThis();
-    const skip = jest.fn().mockReturnThis();
-    const take = jest.fn().mockReturnThis();
-    const getManyAndCount = jest.fn().mockResolvedValue([[], 0]);
-
-    repo.createQueryBuilder.mockReturnValue({
-      andWhere,
-      orderBy,
-      skip,
-      take,
-      getManyAndCount,
-    });
-
     await service.findAll({}, reviewerA);
 
-    expect(andWhere).toHaveBeenCalledWith(
-      '(app.assigned_reviewer_id = :reviewerId OR app.created_by_id = :reviewerId)',
-      { reviewerId: 'reviewer-a' },
-    );
+    expect(repo.findPaginated).toHaveBeenCalledWith({
+      page: 1,
+      limit: 20,
+      status: undefined,
+      createdById: undefined,
+      reviewerId: 'reviewer-a',
+    });
   });
 
   it('rejects update when status is not editable', async () => {
-    repo.findOne.mockResolvedValue({
+    repo.findById.mockResolvedValue({
       ...baseApp(),
       status: ApplicationStatus.SUBMITTED,
     });
@@ -224,7 +213,7 @@ describe('MerchantApplicationsService', () => {
 
   it('submits draft and enqueues KYB job', async () => {
     const app = baseApp();
-    repo.findOne.mockResolvedValue(app);
+    repo.findById.mockResolvedValue(app);
     repo.save.mockImplementation(async (x) => x);
 
     const result = await service.submit('app-1', salesA);
@@ -243,7 +232,7 @@ describe('MerchantApplicationsService', () => {
   });
 
   it('rejects assign when KYB check is not completed', async () => {
-    repo.findOne.mockResolvedValue({
+    repo.findById.mockResolvedValue({
       ...baseApp(),
       status: ApplicationStatus.SUBMITTED,
       kybCheckStatus: KybCheckStatus.PENDING,
@@ -255,7 +244,7 @@ describe('MerchantApplicationsService', () => {
   });
 
   it('assigns reviewer after KYB completes', async () => {
-    repo.findOne.mockResolvedValue({
+    repo.findById.mockResolvedValue({
       ...baseApp(),
       status: ApplicationStatus.SUBMITTED,
       kybCheckStatus: KybCheckStatus.COMPLETED,
@@ -274,7 +263,7 @@ describe('MerchantApplicationsService', () => {
   });
 
   it('forbids decide when no reviewer is assigned', async () => {
-    repo.findOne.mockResolvedValue({
+    repo.findById.mockResolvedValue({
       ...baseApp(),
       status: ApplicationStatus.IN_REVIEW,
       assignedReviewerId: null,
@@ -290,7 +279,7 @@ describe('MerchantApplicationsService', () => {
   });
 
   it('forbids non-assignee reviewer from approving', async () => {
-    repo.findOne.mockResolvedValue({
+    repo.findById.mockResolvedValue({
       ...baseApp(),
       status: ApplicationStatus.IN_REVIEW,
       assignedReviewerId: 'reviewer-a',
@@ -312,7 +301,7 @@ describe('MerchantApplicationsService', () => {
   });
 
   it('allows assigned reviewer to approve in_review application', async () => {
-    repo.findOne.mockResolvedValue({
+    repo.findById.mockResolvedValue({
       ...baseApp(),
       status: ApplicationStatus.IN_REVIEW,
       assignedReviewerId: 'reviewer-a',
@@ -329,7 +318,7 @@ describe('MerchantApplicationsService', () => {
   });
 
   it('rejects approve when not in_review', async () => {
-    repo.findOne.mockResolvedValue({
+    repo.findById.mockResolvedValue({
       ...baseApp(),
       status: ApplicationStatus.SUBMITTED,
       assignedReviewerId: 'reviewer-a',
